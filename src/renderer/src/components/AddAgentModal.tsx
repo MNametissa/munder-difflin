@@ -244,6 +244,11 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const [folderNote, setFolderNote] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  // Claude profile for this agent ('default', 'mecid', …). Resolved to a
+  // CLAUDE_CONFIG_DIR at spawn so `claude --resume` reads the right pool.
+  const [profileId, setProfileId] = useState<string>('default');
+  const [profiles, setProfiles] = useState<Array<{ id: string; label: string; isDefault: boolean; hasSessions: boolean; }>>([]);
+  const [sessions, setSessions] = useState<Array<{ sessionId: string; cwd: string | null; mtime: number; profileId: string; }>>([]);
   // Which config section the left sidebar index is showing.
   const [section, setSection] = useState<SectionKey>('identity');
   // "Generate a hire with AI" helper — reveals a copy-paste prompt (item 7).
@@ -273,14 +278,28 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   // Zero-step resume: when a session id is entered, look up the cwd it originally
   // ran in (from the transcript) and pre-fill the Folder so the user doesn't have
   // to find the worktree. They can still override the folder afterwards. Runs on
-  // blur so we don't hit the resolver on every keystroke.
+  // blur so we don't hit the resolver on every keystroke. Scoped to the selected
+  // profile when one is set, so a session from e.g. the 'mecid' profile resolves.
   const resolveFolderFromSession = async () => {
     const sid = resumeSessionId.trim();
     if (!sid) { setFolderNote(undefined); return; }
-    const resolved = await window.cth.resolveSessionCwd(sid);
+    const resolved = await window.cth.resolveSessionCwd(sid, profileId);
     if (resolved) { setCwd(resolved); setFolderNote(tr('addAgent.folderFromSession', { path: resolved })); }
     else setFolderNote(undefined);
   };
+
+  // Load the profile list once, then the session list whenever the selected
+  // profile changes. Sessions feed the "resume session" picker below.
+  useEffect(() => {
+    let cancelled = false;
+    window.cth.listProfiles().then((ps) => { if (!cancelled) setProfiles(ps); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    window.cth.listSessions(profileId).then((ss) => { if (!cancelled) setSessions(ss); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [profileId]);
 
   const pickFolder = async () => {
     setError(undefined);
@@ -417,6 +436,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
       isolate: resuming ? false : isolate,
       // #2 — continue an existing Claude session in this agent's cwd.
       resumeSessionId: resuming ? resumeSessionId.trim() : undefined,
+      profileId,
       // Provision this agent in the hive (memory + mailbox + identity/protocol).
       hive: {
         id,
@@ -867,6 +887,34 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                           {tr('addAgent.resumeNote')}
                         </span>
                       )}
+                      {sessions.length > 0 && (
+                        <select
+                          value={resumeSessionId}
+                          onChange={(e) => { setResumeSessionId(e.target.value); setFolderNote(undefined); }}
+                          style={{ ...inputStyle, fontFamily: 'var(--cth-font-mono)', fontSize: 12, marginTop: 4 }}
+                        >
+                          <option value="">— pick a recent session —</option>
+                          {sessions.slice(0, 30).map((s) => (
+                            <option key={s.sessionId} value={s.sessionId}>
+                              {s.sessionId.slice(0, 8)} · {s.cwd ?? '?'} · {new Date(s.mtime).toLocaleString()}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </Row>
+                    <Row label="Profile">
+                      <select
+                        value={profileId}
+                        onChange={(e) => setProfileId(e.target.value)}
+                        style={{ ...inputStyle, fontFamily: 'var(--cth-font-ui)', fontSize: 13 }}
+                      >
+                        {profiles.length === 0 && <option value="default">default</option>}
+                        {profiles.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.label}{p.hasSessions ? '' : ' (no sessions)'}
+                          </option>
+                        ))}
+                      </select>
                     </Row>
                   </>
                 )}
