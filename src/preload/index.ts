@@ -223,6 +223,11 @@ export interface SpawnPtyOptions {
    *  main process seeds that session's `.jsonl` into the target cwd's project dir
    *  (copying it from wherever it lives) and launches `claude --resume <id>`. */
   resumeSessionId?: string;
+  /** Claude profile id for this agent ('default', 'mecid', 'dave', …). Resolved
+   *  to a CLAUDE_CONFIG_DIR and injected into the spawn env so `claude --resume`
+   *  reads the right session pool. Falls back to the hive meta's profileId, then
+   *  to the operator's default. */
+  profileId?: string;
 }
 
 export interface PtyExit { exitCode: number; signal?: number | undefined }
@@ -599,9 +604,21 @@ const api = {
   }>> =>
     ipcRenderer.invoke('pty:list'),
   /** Resolve a Claude session id to the cwd it originally ran in (Add Agent
-   *  resume auto-fill), or null if the id is invalid/unknown. */
-  resolveSessionCwd: (sessionId: string): Promise<string | null> =>
-    ipcRenderer.invoke('session:resolveCwd', sessionId),
+   *  resume auto-fill), or null if the id is invalid/unknown. When `profileId`
+   *  is given, the lookup is scoped to that profile's project tree; otherwise
+   *  every profile is scanned. */
+  resolveSessionCwd: (sessionId: string, profileId?: string): Promise<string | null> =>
+    ipcRenderer.invoke('session:resolveCwd', sessionId, profileId),
+  /** List every Claude profile on this machine (default + ~/.claude-<name> dirs
+   *  that hold a settings.json), for the Add Agent profile selector and the
+   *  session-picker group headers. */
+  listProfiles: () =>
+    ipcRenderer.invoke('profiles:list') as Promise<Array<{ id: string; dir: string; label: string; isDefault: boolean; hasSessions: boolean; }>>,
+  /** List Claude sessions across every profile (or one profile when profileId is
+   *  set), newest-first, for the Add Agent "resume session" picker. Each entry
+   *  carries its profileId so the UI can group by profile. */
+  listSessions: (profileId?: string) =>
+    ipcRenderer.invoke('sessions:list', profileId) as Promise<Array<{ sessionId: string; cwd: string | null; mtime: number; profileId: string; }>>,
   onPtyData: (id: string, cb: (data: string) => void): (() => void) => {
     const channel = `pty:data:${id}`;
     const listener = (_e: IpcRendererEvent, data: string) => cb(data);

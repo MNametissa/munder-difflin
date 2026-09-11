@@ -142,6 +142,11 @@ export interface AgentMeta {
   /** Michael's prep assistant — enriches prompts and forwards them to Michael.
    *  Send-only: excluded from broadcast fan-out so it never drains an inbox. */
   isAssistant?: boolean;
+  /** Claude profile id this agent runs under ('default', 'mecid', 'dave', …).
+   *  Resolved to a CLAUDE_CONFIG_DIR at spawn so `claude --resume` finds the
+   *  right session pool. Persisted in registry.json so a restarted agent re-resumes
+   *  under the same profile. Unset → defaultProfileId(). */
+  profileId?: string;
 }
 
 export interface RegistryAgent extends AgentMeta {

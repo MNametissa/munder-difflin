@@ -34,6 +34,7 @@ import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd } from './transcript';
+import { listProfiles, profileDir, defaultProfileId } from './profiles';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -2570,7 +2571,7 @@ function findCodexHomeForSession(sessionId: string, siblingsRoot: string): strin
 
 /** Spawn options shared by the `pty:spawn` IPC handler and the god-triggered
  *  ephemeral-worker watcher. */
-type AgentSpawnOptions = SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; requireResume?: boolean; resumeSessionId?: string; provider?: AgentProvider; noAutoInstall?: boolean };
+type AgentSpawnOptions = SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; requireResume?: boolean; resumeSessionId?: string; provider?: AgentProvider; noAutoInstall?: boolean; profileId?: string };
 
 /** Map a `ptyManager.spawn` failure string to the closed `agent_spawn_failed.reason`
  *  enum (analytics.ts). The two known strings come from PtyManager.spawn; anything
@@ -2608,7 +2609,13 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // registry store an ABSOLUTE cwd (and `cwdValid: true`). The resolved value is
   // returned to the caller so the renderer records the same absolute path.
   opts.cwd = expandTilde(opts.cwd);
-  if (opts.hive) opts.hive = { ...opts.hive, cwd: expandTilde(opts.hive.cwd) };
+  if (opts.hive) {
+    opts.hive = { ...opts.hive, cwd: expandTilde(opts.hive.cwd) };
+    // Persist the resolved profile onto the hive meta so the registry stores it
+    // (a restarted agent re-resumes under the same profile). opts.profileId
+    // (from the UI) wins; an existing hive meta profileId is kept otherwise.
+    if (opts.profileId) opts.hive = { ...opts.hive, profileId: opts.profileId };
+  }
   // Which CLI is this? Explicit wins; else inferred from the binary
   // (claude/codex/grok/agy). Non-Claude providers skip every Claude-only spawn step
   // below. Persist the resolved provider onto opts (+ hive meta) so the registry
@@ -2835,6 +2842,16 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     if (typeof cfg.maxTurns === 'number' && cfg.maxTurns > 0 && !args.includes('--max-turns')) {
       args.push('--max-turns', String(cfg.maxTurns));
     }
+    // Claude profile: resolve the agent's profileId (opts → hive meta → operator
+    // default) to a config dir and inject CLAUDE_CONFIG_DIR into the spawn env.
+    // buildPtyEnv (ptyEnv.ts) keeps CLAUDE_CONFIG_DIR, so the spawned `claude`
+    // reads + writes sessions under the right profile. The same dir is passed to
+    // seedSessionTranscript / resolveSessionCwd so resume finds the right pool.
+    const agentProfileId = opts.profileId ?? opts.hive?.profileId ?? defaultProfileId();
+    const agentConfigDir = profileDir(agentProfileId);
+    if (agentConfigDir) {
+      opts.env = { ...(opts.env ?? {}), CLAUDE_CONFIG_DIR: agentConfigDir };
+    }
     // Resume: an explicit session id (Add Agent "resume session" field, #2) wins,
     // else this agent's last recorded session (#1 restore-on-restart / #6.6a).
     // Seed the transcript into the target cwd's Claude project dir first — Claude
@@ -2845,7 +2862,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     const explicitSid = typeof opts.resumeSessionId === 'string' ? opts.resumeSessionId.trim() : '';
     const sid = explicitSid || (opts.resume === true ? hive.lastSession(opts.hive.id) : undefined);
     if (sid && !args.includes('--resume')) {
-      if (seedSessionTranscript(opts.cwd, sid)) {
+      if (seedSessionTranscript(opts.cwd, sid, agentConfigDir ?? undefined)) {
         args.push('--resume', sid);
         didResume = true;
       } else if (explicitSid) {
@@ -3051,8 +3068,62 @@ ipcMain.handle('analytics:messageSent', (_evt, surface: unknown) => {
 // Resolve a pasted Claude session id to the cwd it originally ran in, so the Add
 // Agent dialog can auto-fill the folder for a resume (#2 zero-step resume). Reads
 // the cwd from a transcript record; null when the id is invalid/unknown.
-ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown) =>
-  (typeof sessionId === 'string' ? resolveSessionCwd(sessionId) : null));
+// Accepts an optional profileId so the lookup is scoped to one profile rather
+// than scanning every profile's tree.
+ipcMain.handle('session:resolveCwd', (_evt, sessionId: unknown, profileId?: unknown) => {
+  if (typeof sessionId !== 'string') return null;
+  const cfg = typeof profileId === 'string' && profileId ? (profileDir(profileId) ?? undefined) : undefined;
+  return resolveSessionCwd(sessionId, cfg);
+});
+
+// ─── IPC: profiles + sessions listing ───────────────────────────────────────
+// Lists every Claude profile on this machine (settings.json-bearing ~/.claude*
+// dirs) for the Add Agent profile selector and the session-picker group headers.
+ipcMain.handle('profiles:list', () => listProfiles());
+
+// Lists sessions across every profile (or one profile when profileId is given),
+// for the Add Agent "resume session" picker. Each entry carries its profileId so
+// the UI can group by profile and the spawn can target the right CLAUDE_CONFIG_DIR.
+ipcMain.handle('sessions:list', (_evt, profileId?: unknown) => {
+  const { readdirSync, readFileSync, statSync } = require('node:fs') as typeof import('node:fs');
+  const pathMod = require('node:path') as typeof import('node:path');
+  const profiles = typeof profileId === 'string' && profileId
+    ? (listProfiles().filter((p) => p.id === profileId))
+    : listProfiles();
+  const out: Array<{ sessionId: string; cwd: string | null; mtime: number; profileId: string; }> = [];
+  for (const p of profiles) {
+    const root = pathMod.join(p.dir, 'projects');
+    let projectDirs: string[] = [];
+    try { projectDirs = readdirSync(root); } catch { /* no projects for this profile */ }
+    for (const sub of projectDirs) {
+      const subDir = pathMod.join(root, sub);
+      try { if (!statSync(subDir).isDirectory()) continue; } catch { continue; }
+      let files: string[] = [];
+      try { files = readdirSync(subDir); } catch { continue; }
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) continue;
+        const file = pathMod.join(subDir, f);
+        const sessionId = f.slice(0, -'.jsonl'.length);
+        let mtime = 0, cwd: string | null = null;
+        try { mtime = statSync(file).mtimeMs; } catch { continue; }
+        try {
+          const text = readFileSync(file, 'utf8');
+          for (const line of text.split('\n')) {
+            const t = line.trim();
+            if (!t) continue;
+            try {
+              const rec = JSON.parse(t) as { cwd?: unknown };
+              if (typeof rec.cwd === 'string' && rec.cwd) { cwd = rec.cwd; break; }
+            } catch { /* malformed line */ }
+          }
+        } catch { /* unreadable */ }
+        out.push({ sessionId, cwd, mtime, profileId: p.id });
+      }
+    }
+  }
+  out.sort((a, b) => b.mtime - a.mtime);
+  return out;
+});
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────
 ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {

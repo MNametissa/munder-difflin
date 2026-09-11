@@ -45,6 +45,9 @@ export interface HiddenClaudeOptions {
   timeoutMs?: number;
   /** Extra env merged over the resolved shell env (e.g. the shared MemPalace). */
   env?: Record<string, string>;
+  /** Claude config dir to read transcripts from (a profile dir like
+   *  ~/.claude-mecid). Defaults to CLAUDE_CONFIG_DIR or ~/.claude. */
+  configDir?: string;
 }
 
 export interface HiddenClaudeResult {
@@ -58,9 +61,9 @@ export interface HiddenClaudeResult {
  * Extract the last assistant text block from the transcript JSONL written
  * at or after `spawnedAt`. Reuses projectDir() from transcript.ts.
  */
-function extractLastAssistantText(cwd: string, spawnedAt: number): string | null {
+function extractLastAssistantText(cwd: string, spawnedAt: number, configDir?: string): string | null {
   try {
-    const dir = projectDir(cwd);
+    const dir = projectDir(cwd, configDir);
     if (!existsSync(dir)) return null;
 
     const candidates: { f: string; mtime: number }[] = [];
@@ -176,7 +179,7 @@ export function runHiddenClaude(prompt: string, opts: HiddenClaudeOptions): Prom
     };
 
     const captureAndFinish = () => {
-      const text = extractLastAssistantText(opts.cwd, spawnedAt);
+      const text = extractLastAssistantText(opts.cwd, spawnedAt, opts.configDir);
       finish(text
         ? { ok: true, text }
         : { ok: false, error: 'no assistant response found in transcript' });

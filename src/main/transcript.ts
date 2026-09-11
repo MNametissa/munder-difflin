@@ -3,6 +3,34 @@ import os from 'node:os';
 import path from 'node:path';
 import { estimateCostUsd, normalizeModel } from './pricing';
 
+/** Resolve the Claude Code config directory for transcript lookups. Falls back to
+ *  the operator's CLAUDE_CONFIG_DIR (set when running under a named profile), then
+ *  to the default ~/.claude. Every transcript function below accepts an optional
+ *  configDir override so a multi-profile harness can read each profile's pool. */
+export function defaultClaudeDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude');
+}
+
+/** All Claude config directories across every profile: ~/.claude (default) plus
+ *  every ~/.claude-<name> that holds a settings.json (filters out fossil dirs
+ *  like .claude-flow or .claude-shared that have no settings). Used when a search
+ *  must span every profile — e.g. seedSessionTranscript finding a session that
+ *  originated under a different profile than the target cwd. */
+export function allClaudeDirs(): string[] {
+  const home = os.homedir();
+  const dirs: string[] = [];
+  const def = path.join(home, '.claude');
+  if (existsSync(path.join(def, 'settings.json'))) dirs.push(def);
+  try {
+    for (const entry of readdirSync(home)) {
+      if (!entry.startsWith('.claude-')) continue;
+      const dir = path.join(home, entry);
+      try { if (statSync(dir).isDirectory() && existsSync(path.join(dir, 'settings.json'))) dirs.push(dir); } catch { /* skip */ }
+    }
+  } catch { /* home unreadable — def above is enough */ }
+  return dirs.length ? dirs : [def];
+}
+
 /** Claude Code's project key: the absolute cwd with EVERY non-alphanumeric
  *  character turned into a dash — the leading slash and any dots included.
  *  /Users/me/app → -Users-me-app, /Users/me/MDv0.3.0 → -Users-me-MDv0-3-0,
@@ -40,8 +68,8 @@ function legacyProjectKey(cwd: string): string {
  *  our own stale copies forever. When neither exists we return the CURRENT
  *  spelling, because callers that go on to create the directory must create the
  *  one Claude Code will actually read. */
-export function projectDir(cwd: string): string {
-  const root = path.join(os.homedir(), '.claude/projects');
+export function projectDir(cwd: string, configDir?: string): string {
+  const root = path.join(configDir ?? defaultClaudeDir(), 'projects');
   const current = path.join(root, projectKey(cwd));
   if (existsSync(current)) return current;
   // For cwd '/' the legacy key is the empty string, and path.join(root, '')
@@ -72,19 +100,23 @@ export function projectDir(cwd: string): string {
  *  crafted id like `../../x` would otherwise traverse out of the project dirs). */
 const VALID_SESSION_ID = /^[A-Za-z0-9_-]+$/;
 
-export function seedSessionTranscript(cwd: string, sessionId: string): boolean {
+export function seedSessionTranscript(cwd: string, sessionId: string, configDir?: string): boolean {
   try {
     if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return false;
-    const target = path.join(projectDir(cwd), `${sessionId}.jsonl`);
+    const target = path.join(projectDir(cwd, configDir), `${sessionId}.jsonl`);
     if (existsSync(target)) return true;
-    const projectsRoot = path.join(os.homedir(), '.claude/projects');
-    if (!existsSync(projectsRoot)) return false;
-    for (const dir of readdirSync(projectsRoot)) {
-      const candidate = path.join(projectsRoot, dir, `${sessionId}.jsonl`);
-      if (existsSync(candidate)) {
-        mkdirSync(path.dirname(target), { recursive: true });
-        cpSync(candidate, target);
-        return true;
+    // Search every profile's projects tree: a session resumed from another
+    // profile (or another cwd) can live under a different configDir entirely.
+    for (const dir of allClaudeDirs()) {
+      const projectsRoot = path.join(dir, 'projects');
+      if (!existsSync(projectsRoot)) continue;
+      for (const sub of readdirSync(projectsRoot)) {
+        const candidate = path.join(projectsRoot, sub, `${sessionId}.jsonl`);
+        if (existsSync(candidate)) {
+          mkdirSync(path.dirname(target), { recursive: true });
+          cpSync(candidate, target);
+          return true;
+        }
       }
     }
     return false;
@@ -100,18 +132,24 @@ export function seedSessionTranscript(cwd: string, sessionId: string): boolean {
  *  every `~/.claude/projects/<dir>/<sessionId>.jsonl`; if more than one matches
  *  (shouldn't — session ids are unique UUIDs) the most-recently-modified wins.
  *  Returns the cwd string, or null if not found / unreadable / no cwd record. */
-export function resolveSessionCwd(sessionId: string): string | null {
+export function resolveSessionCwd(sessionId: string, configDir?: string): string | null {
   try {
     if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return null;
-    const projectsRoot = path.join(os.homedir(), '.claude/projects');
-    if (!existsSync(projectsRoot)) return null;
+    // When a configDir is given, search only that profile; otherwise scan every
+    // profile so a session-id pasted from one profile resolves even when the
+    // caller didn't say which.
+    const searchDirs = configDir ? [configDir] : allClaudeDirs();
     let best: { file: string; mtime: number } | null = null;
-    for (const dir of readdirSync(projectsRoot)) {
-      const candidate = path.join(projectsRoot, dir, `${sessionId}.jsonl`);
-      try {
-        const st = statSync(candidate);
-        if (!best || st.mtimeMs > best.mtime) best = { file: candidate, mtime: st.mtimeMs };
-      } catch { /* not present in this project dir */ }
+    for (const cfg of searchDirs) {
+      const projectsRoot = path.join(cfg, 'projects');
+      if (!existsSync(projectsRoot)) continue;
+      for (const dir of readdirSync(projectsRoot)) {
+        const candidate = path.join(projectsRoot, dir, `${sessionId}.jsonl`);
+        try {
+          const st = statSync(candidate);
+          if (!best || st.mtimeMs > best.mtime) best = { file: candidate, mtime: st.mtimeMs };
+        } catch { /* not present in this project dir */ }
+      }
     }
     if (!best) return null;
     const text = readFileSync(best.file, 'utf8');
@@ -310,10 +348,10 @@ function readFileUsage(dir: string, file: string): FileUsageEntry | null {
  *  Called from the ~30s breaker/cost beat for every agent without live OTel, so
  *  it must stay cheap on multi-MB transcript dirs: per-file incremental caching
  *  above means a steady-state call is a readdir + one stat per file. */
-export function readAgentUsage(cwd: string, opts: ReadUsageOptions = {}): AgentUsage {
+export function readAgentUsage(cwd: string, opts: ReadUsageOptions = {}, configDir?: string): AgentUsage {
   const usage = zero();
   try {
-    const dir = projectDir(cwd);
+    const dir = projectDir(cwd, configDir);
     if (!existsSync(dir)) return usage;
     const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
     let lastModel: string | undefined;
