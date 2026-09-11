@@ -2127,8 +2127,8 @@ function stopWebhookServer(): void {
 /** The persisted main-window geometry (kv key `window.bounds`). */
 interface WindowBounds { x?: number; y?: number; width: number; height: number }
 
-const DEFAULT_WIN = { width: 1440, height: 900 };
-const MIN_WIN = { width: 1280, height: 800 };
+const DEFAULT_WIN = { width: 1280, height: 720 };
+const MIN_WIN = { width: 800, height: 480 };
 
 /** Validate + clamp restored bounds: enforce the minimum size, and drop a
  *  position that no longer lands on any connected display (monitor unplugged) so
