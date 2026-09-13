@@ -399,7 +399,8 @@ const BACKEND_KEY_ENV: Record<string, string> = {
   openai: 'OPENAI_API_KEY',
   google: 'GEMINI_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
-  groq: 'GROQ_API_KEY'
+  groq: 'GROQ_API_KEY',
+  ark: 'ANTHROPIC_AUTH_TOKEN'
 };
 const providerKeyRef = (backend: string): string => `apikey:${backend}`;
 
