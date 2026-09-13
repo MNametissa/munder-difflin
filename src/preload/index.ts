@@ -619,6 +619,35 @@ const api = {
    *  carries its profileId so the UI can group by profile. */
   listSessions: (profileId?: string) =>
     ipcRenderer.invoke('sessions:list', profileId) as Promise<Array<{ sessionId: string; cwd: string | null; mtime: number; profileId: string; }>>,
+  /** Unified model catalog: builtin + detected (from profile modelPicker) + custom. */
+  listModels: () =>
+    ipcRenderer.invoke('models:list') as Promise<Array<{ id?: string; label: string; modalities?: string[]; source: string; provider?: string }>>,
+  /** Re-scan profile settings for modelPicker changes. */
+  rescanModels: () =>
+    ipcRenderer.invoke('models:rescan') as Promise<unknown>,
+  /** Add a custom model to the persisted config. */
+  addModel: (model: { label: string; id?: string; modalities?: string[]; provider?: string }) =>
+    ipcRenderer.invoke('models:add', model) as Promise<{ ok: boolean; error?: string }>,
+  /** Remove a custom model by id or label. */
+  removeModel: (idOrLabel: string) =>
+    ipcRenderer.invoke('models:remove', idOrLabel) as Promise<{ ok: boolean; error?: string }>,
+  /** Ark/ByteDance billing status (plan, credits, rate limits). Read-only.
+   *  Pass `force: true` to skip the cache. */
+  getBillingStatus: (force?: boolean) =>
+    ipcRenderer.invoke('billing:status', force) as Promise<{
+      plan?: string; creditsRemaining?: number; creditsTotal?: number;
+      freeCreditsAvailable?: number; freeCreditsClaimed?: number;
+      resetAt?: number; rateLimitTier?: string; fetchedAt: number; raw?: string;
+    } | null>,
+  /** List all media files (images + videos) in the gallery, newest-first. */
+  listMedia: () =>
+    ipcRenderer.invoke('media:list') as Promise<Array<{
+      id: string; type: 'image' | 'video'; path: string; prompt?: string;
+      model?: string; agentId?: string; size: number; createdAt: number;
+    }>>,
+  /** Delete a media entry by id. */
+  deleteMedia: (id: string) =>
+    ipcRenderer.invoke('media:delete', id) as Promise<{ ok: boolean; error?: string }>,
   onPtyData: (id: string, cb: (data: string) => void): (() => void) => {
     const channel = `pty:data:${id}`;
     const listener = (_e: IpcRendererEvent, data: string) => cb(data);

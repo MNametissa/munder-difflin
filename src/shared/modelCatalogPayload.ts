@@ -31,12 +31,20 @@
 /** One row of the catalog. `minAppVersion` / `maxAppVersion` are INCLUSIVE app
  *  version bounds; null (or an absent key) means unbounded in that direction.
  *  See the long note on the filter in src/renderer/src/store/config.ts. */
+export type Modality = 'code' | 'docs' | 'image' | 'video' | 'embedding';
+
 export interface CatalogModel {
   /** absent = use the CLI default (no --model flag) */
   id?: string;
   label: string;
   minAppVersion?: string | null;
   maxAppVersion?: string | null;
+  /** Modalités supportées par ce modèle. Absent = ['code'] par convention. */
+  modalities?: Modality[];
+  /** Origine du modèle dans le catalogue unifié. */
+  source?: 'builtin' | 'detected' | 'custom';
+  /** Provider de l'API ('ark', 'anthropic', 'openai', 'local', …). */
+  provider?: string;
 }
 
 export interface ModelCatalog {
@@ -81,6 +89,19 @@ function bound(value: unknown): string | null {
 
 /** One catalog row, or null if it cannot be rendered. A row with no label is
  *  dropped: an option the user cannot read is worse than a missing option. */
+const VALID_MODALITIES: Modality[] = ['code', 'docs', 'image', 'video', 'embedding'];
+
+function parseModalities(raw: unknown): Modality[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: Modality[] = [];
+  for (const m of raw) {
+    if (typeof m === 'string' && VALID_MODALITIES.includes(m as Modality) && !out.includes(m as Modality)) {
+      out.push(m as Modality);
+    }
+  }
+  return out.length ? out : undefined;
+}
+
 function parseModel(raw: unknown): CatalogModel | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
@@ -95,6 +116,12 @@ function parseModel(raw: unknown): CatalogModel | null {
   const max = bound(o.maxAppVersion);
   if (min) model.minAppVersion = min;
   if (max) model.maxAppVersion = max;
+  const modalities = parseModalities(o.modalities);
+  if (modalities) model.modalities = modalities;
+  const source = str(o.source, MAX.key);
+  if (source && (source === 'builtin' || source === 'detected' || source === 'custom')) model.source = source;
+  const provider = str(o.provider, MAX.key);
+  if (provider) model.provider = provider;
   return model;
 }
 

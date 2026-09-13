@@ -35,6 +35,9 @@ import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd } from './transcript';
 import { listProfiles, profileDir, defaultProfileId } from './profiles';
+import { detectModels, readCustomModels, BAKED_ARK_MODELS } from './modelDetector';
+import { getArkBilling } from './arkBilling';
+import { listMedia, captureMedia, deleteMedia } from './mediaCapture';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -3123,6 +3126,70 @@ ipcMain.handle('sessions:list', (_evt, profileId?: unknown) => {
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out;
+});
+
+// ─── IPC: models ────────────────────────────────────────────────────────────
+// Unified model catalog: builtin (baked) + detected (from profile modelPicker)
+// + custom (user-added via Settings). The renderer uses this to populate every
+// model picker, grouped by provider and tagged with modalities.
+ipcMain.handle('models:list', () => {
+  const detected = detectModels();
+  const custom = readConfig().customModels?.map((m) => ({ ...m, source: 'custom' as const })) ?? [];
+  const seen = new Set<string>();
+  const out: Array<{ id?: string; label: string; modalities?: string[]; source: string; provider?: string }> = [];
+  for (const m of [...BAKED_ARK_MODELS, ...detected, ...custom]) {
+    const key = m.id ?? m.label;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: m.id, label: m.label, modalities: m.modalities as string[] | undefined, source: m.source ?? 'builtin', provider: m.provider });
+  }
+  return out;
+});
+
+ipcMain.handle('models:rescan', () => {
+  // Re-read profile settings — the detectModels() call is already fresh on
+  // every models:list, so this is just a marker the renderer can await to know
+  // a rescan completed (e.g. after the user edited a settings.json externally).
+  return detectModels();
+});
+
+ipcMain.handle('models:add', (_evt, model: unknown) => {
+  if (!model || typeof model !== 'object' || typeof (model as { label?: unknown }).label !== 'string') {
+    return { ok: false, error: 'invalid model' };
+  }
+  const m = model as { label: string; id?: string; modalities?: string[]; provider?: string };
+  const cfg = readConfig();
+  const custom = cfg.customModels ?? [];
+  // De-dup by id (or label when no id) so a re-add is a no-op, not a duplicate.
+  const key = m.id ?? m.label;
+  if (custom.some((c) => (c.id ?? c.label) === key)) {
+    return { ok: false, error: 'model already exists' };
+  }
+  custom.push({ id: m.id, label: m.label, modalities: m.modalities, provider: m.provider });
+  writeConfig({ customModels: custom });
+  return { ok: true };
+});
+
+ipcMain.handle('models:remove', (_evt, idOrLabel: unknown) => {
+  if (typeof idOrLabel !== 'string') return { ok: false, error: 'invalid id' };
+  const cfg = readConfig();
+  const custom = cfg.customModels ?? [];
+  const filtered = custom.filter((c) => (c.id ?? c.label) !== idOrLabel);
+  if (filtered.length === custom.length) return { ok: false, error: 'not found' };
+  writeConfig({ customModels: filtered });
+  return { ok: true };
+});
+
+// ─── IPC: billing (Ark/ByteDance, read-only) ────────────────────────────────
+ipcMain.handle('billing:status', async (_evt, force?: unknown) => {
+  return getArkBilling({ force: force === true });
+});
+
+// ─── IPC: media gallery ─────────────────────────────────────────────────────
+ipcMain.handle('media:list', () => listMedia());
+ipcMain.handle('media:delete', (_evt, id: unknown) => {
+  if (typeof id !== 'string') return { ok: false, error: 'invalid id' };
+  return deleteMedia(id) ? { ok: true } : { ok: false, error: 'not found' };
 });
 
 // ─── IPC: clipboard ─────────────────────────────────────────────────────────

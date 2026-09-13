@@ -219,6 +219,9 @@ export interface HarnessConfig {
   semanticMemory: boolean;
   /** Embedding model for the palace: lightweight 'minilm' or multilingual 'embeddinggemma'. */
   embeddingModel: 'minilm' | 'embeddinggemma';
+  /** User-added models (label, id, provider, modalities) persisted in config.json.
+   *  Merged with detected + builtin models in the unified catalog. */
+  customModels?: Array<{ id?: string; label: string; modalities?: string[]; provider?: string }>;
   /** Recurring auto-dispatch missions handled by the scheduler. */
   missions?: ScheduledMission[];
   /** One-time guard: has the built-in hourly ops standup been seeded into an

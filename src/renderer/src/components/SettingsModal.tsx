@@ -311,6 +311,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     setSemMemOn(next);
     stage({ semanticMemory: next } as Partial<HarnessConfig>);
   };
+  const [embeddingModel, setEmbeddingModel] = useState<'minilm' | 'embeddinggemma'>(cfgX.embeddingModel ?? 'minilm');
+  const pickEmbeddingModel = async (m: 'minilm' | 'embeddinggemma') => {
+    setEmbeddingModel(m);
+    stage({ embeddingModel: m } as Partial<HarnessConfig>);
+  };
 
   // --- circuit-breaker config (Lane A #6 canonical fields, widened view) ---
   // Drives Jim's real breaker: floor-wide TOKEN budget (costCapTokens) + output-
@@ -1381,6 +1386,19 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             {semMemOn ? t('common.on') : t('common.off')}
                           </PixelButton>
                         </div>
+                        {semMemOn && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                            <span style={{ fontSize: 12, color: 'var(--cth-ink-700)' }}>Embedding model:</span>
+                            <select
+                              value={embeddingModel}
+                              onChange={(e) => pickEmbeddingModel(e.target.value as 'minilm' | 'embeddinggemma')}
+                              style={{ fontSize: 12, padding: '2px 6px', background: 'var(--cth-cream-100)', border: '1px solid var(--cth-ink-300)', borderRadius: 4 }}
+                            >
+                              <option value="minilm">minilm (lightweight)</option>
+                              <option value="embeddinggemma">embeddinggemma (multilingual)</option>
+                            </select>
+                          </div>
+                        )}
                       </div>
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
