@@ -11,7 +11,8 @@
  * Runs in the Electron main process.
  */
 import { createServer, type Server } from 'node:net';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import type { HarnessConfig } from './config';
@@ -19,6 +20,7 @@ import type { ControlRegistry } from './control';
 import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
 import { validateHookEvent } from '../shared/hookEvents';
+import { captureMedia } from './mediaCapture';
 
 /** Maximum JSON payload bytes in one newline-delimited hook frame. */
 const MAX_HOOK_FRAME_BYTES = 256 * 1024;
@@ -234,6 +236,36 @@ export class HookServer {
     // A repeated identical (name+input) PostToolUse is the runaway-loop tell.
     if (event === 'PostToolUse' && agentId) {
       this.breaker?.recordToolUse(agentId, p.tool_name, p.tool_input);
+
+      // Media capture: when an MCP image/video generation tool completes, find
+      // the newest media file in the agent's cwd and copy it into the gallery.
+      // The tool_name pattern is mcp__<server>__<tool>.
+      const toolName = p.tool_name ?? '';
+      if (/^mcp__.*generate/i.test(toolName)) {
+        try {
+          const input = (p.tool_input ?? {}) as Record<string, unknown>;
+          const prompt = typeof input.prompt === 'string' ? input.prompt : undefined;
+          const isVideo = /video/i.test(toolName) || /video/i.test(prompt ?? '');
+          const cwd = typeof p.cwd === 'string' ? p.cwd : process.cwd();
+          // Scan the cwd for the newest image/video file created in the last 30s
+          const exts = isVideo ? ['.mp4', '.webm', '.mov', '.avi'] : ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+          const cutoff = Date.now() - 30_000;
+          let best: { path: string; mtime: number } | null = null;
+          try {
+            for (const f of readdirSync(cwd)) {
+              const lower = f.toLowerCase();
+              if (!exts.some((e) => lower.endsWith(e))) continue;
+              const fp = join(cwd, f);
+              const st = statSync(fp);
+              if (!st.isFile() || st.mtimeMs < cutoff) continue;
+              if (!best || st.mtimeMs > best.mtime) best = { path: fp, mtime: st.mtimeMs };
+            }
+          } catch { /* cwd unreadable */ }
+          if (best) {
+            captureMedia(best.path, { prompt, agentId, type: isVideo ? 'video' : 'image' });
+          }
+        } catch { /* best-effort — never break the hook on capture failure */ }
+      }
     }
 
     // A human just spoke to this agent (issue #376): stamp the third progress
